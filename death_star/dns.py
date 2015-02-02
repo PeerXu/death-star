@@ -1,10 +1,21 @@
-from gevent import monkey
-monkey.patch_all()
-import re
-import gevent
 from collections import namedtuple
-import socket
+from ctypes import create_string_buffer
 import struct
+
+class DNSBuffer(object):
+    def __init__(self):
+        self.data = create_string_buffer(512)
+        self.extra = create_string_buffer(512)
+        self.dof = 0
+        self.eof = 0
+
+    @property
+    def raw(self):
+        return self.data.raw[:self.size]
+
+    @property
+    def size(self):
+        return self.dof
 
 class PacketBase(object):
     FIELDS = ()
@@ -37,6 +48,10 @@ class PacketBase(object):
 
             labels.append(*struct.unpack_from('!%ds' % length, pkt, of))
             of += length
+
+    @classmethod
+    def _pack_labels(cls, label):
+        return ''.join(reduce(lambda xs, acc: xs+(chr(len(acc)), acc), label.split('.'), ())) + '\0'
 
     @classmethod
     def unpack_ipv4_address(cls, pkt, of):
@@ -77,6 +92,18 @@ class DNSHeader(namedtuple('DNSHeader', DNS_HDR_FLDS), PacketBase):
 
         return cls.new(locals()), DNS_HDR_ST.size
 
+    def pack(self, buf):
+        flags = (self.qr << 15) \
+                + (self.opcode << 11) \
+                + (self.aa << 10) \
+                + (self.tc << 9) \
+                + (self.rd << 8) \
+                + (self.ra << 7) \
+                + self.rcode
+        DNS_HDR_ST.pack_into(buf.data, buf.dof, self.id, flags, self.qdcount, self.ancount, self.nscount, self.arcount)
+        buf.dof += DNS_HDR_ST.size
+        return buf
+
 DNS_QU_FLDS = ('qname', 'qtype', 'qclass')
 DNS_QU_SEC_ST = struct.Struct('!2H')
 class DNSQuestion(namedtuple('DNSQuestion', DNS_QU_FLDS), PacketBase):
@@ -97,6 +124,15 @@ class DNSQuestion(namedtuple('DNSQuestion', DNS_QU_FLDS), PacketBase):
             qus.append(qu)
 
         return qus, of
+
+    def pack(self, buf):
+        packed_labels = self._pack_labels(self.qname)
+        packed_labels_len = len(packed_labels)
+        struct.pack_into('!{}c'.format(packed_labels_len), buf.data, buf.dof, *packed_labels)
+        buf.dof += packed_labels_len
+        DNS_QU_SEC_ST.pack_into(buf.data, buf.dof, self.qtype, self.qclass)
+        buf.dof += DNS_QU_SEC_ST.size
+        return buf
 
 DNS_AN_FLDS = ('name', 'type', 'class_', 'ttl', 'rdlength', 'rdata')
 DNS_AN_SEC_ST = struct.Struct('!2HIH')
@@ -125,71 +161,28 @@ class DNSQuery(namedtuple('DNSQuery', DNS_REQ_FLDS),
                  PacketBase):
     FIELDS = DNS_REQ_FLDS
 
+    def pack(self, buf):
+        self.header.pack(buf)
+        map(lambda que: que.pack(buf), self.questions)
+        return buf
+
 DNS_RPY_FLDS = ('header', 'questions', 'answers')
 class DNSResponse(namedtuple('DNSResponse', DNS_RPY_FLDS),
                PacketBase):
     FIELDS = DNS_RPY_FLDS
 
-def parse(pkt):
-    header, offset = DNSHeader.unpack(pkt)
-    questions, offset = DNSQuestion.unpack(pkt, offset, header.qdcount)
+def unpack(raw):
+    header, offset = DNSHeader.unpack(raw)
+    questions, offset = DNSQuestion.unpack(raw, offset, header.qdcount)
 
     if header.qr == 0:
         return DNSQuery.new(locals())
 
-    answers, offset = DNSAnswer.unpack(pkt, offset, header.ancount)
+    answers, offset = DNSAnswer.unpack(raw, offset, header.ancount)
 
     return DNSResponse.new(locals())
 
-class DNSServer(object):
-    def __init__(self, real_dns_addr=None):
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    def on_query(self, sip, sport, req):
-        s = None
-        try:
-            print "[D] raw request: {}".format(repr(req))
-            print "[D] request: {}".format(parse(req))
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            if s.sendto(req, ('114.114.114.114', 53)) == 0:
-                print "[!] failed to query"
-            else:
-                reply = s.recv(2048)
-                print "[D] raw reply: {}".format(repr(reply))
-                print "[D] reply: {}".format(parse(reply))
-                self._sock.sendto(reply, (sip, sport))
-        finally:
-            s and s.close()
-
-    def serve_forever(self):
-        self._sock.bind(('0.0.0.0', 53))
-        try:
-            while True:
-                request, (ip, port) = self._sock.recvfrom(2048)
-                gevent.spawn(self.on_query, ip, port, request)
-        except KeyboardInterrupt:
-            print "[X] exit."
-        finally:
-            self._sock.close()
-
-class MatchEngine(object):
-    def _read_rules_from_file(self, f):
-        _rules = {}
-        with open(f) as fr:
-            rules = fr.read().split('\n')[:-1]
-        for rule in rules:
-            domain, host = rule.split()
-            if host[0] == '<' and host[-1] == '>':
-                host = self._const[host[1:-1]]
-            _rules[re.compile(domain)] = host
-        return _rules
-
-    def __init__(self, resolv_file, const=None):
-        self._const = const if isinstance(const, dict) else {}
-        self._rules = self._read_rules_from_file(resolv_file)
-
-    def lookup(self, domain):
-        for domain_rule, host in self._rules.items():
-            if domain_rule.match(domain):
-                return host
-        return None
+def pack(pkt):
+    buf = DNSBuffer()
+    pkt.pack(buf)
+    return buf.raw
