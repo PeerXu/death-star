@@ -1,2 +1,0 @@
-^(.*\.)?baidu\.com$     <current>
-^(.*\.)?google\.com$    <current>

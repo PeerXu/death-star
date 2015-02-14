@@ -5,6 +5,9 @@ import socket
 import re
 
 import dns
+import log
+
+LOG = log.get_logger('dns-proxy')
 
 class DNSServer(object):
     def __init__(self, host='0.0.0.0', port=53, nameserver='114.114.114.114'):
@@ -18,17 +21,18 @@ class DNSServer(object):
         def lookup_remote_nameserver(que):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             if s.sendto(dns.pack(que), (self.nameserver, 53)) == 0:
-                print "[!] failed to query"
+                LOG.error('failed to query')
                 raise Exception('query failed')
 
             _resp = s.recv(2048)
+            LOG.debug("raw response: {}".format(repr(_resp)))
             resp = dns.unpack(_resp)
             return resp
         # end lookup_remote_nameserver
 
-        print "[D] raw query: {}".format(repr(req))
+        LOG.debug("raw query: {}".format(repr(req)))
         que = dns.unpack(req)
-        print "[D] query: {}".format(que)
+        LOG.debug("query: {}".format(que))
         host = self.engine.lookup(que.questions[0].qname)
 
         if not host:
@@ -48,8 +52,8 @@ class DNSServer(object):
                     rdlength=4, rdata=host)])
 
         _resp = dns.pack(resp)
-        print "[D] raw response: {}".format(repr(_resp))
-        print "[D] response: {}".format(resp)
+        LOG.debug("raw response: {}".format(repr(_resp)))
+        LOG.debug("response: {}".format(resp))
         self.sock.sendto(_resp, (sip, sport))
 
     def serve_forever(self):
@@ -60,7 +64,7 @@ class DNSServer(object):
                 msg, (ip, port) = self.sock.recvfrom(2048)
                 gevent.spawn(self.on_query, ip, port, msg)
         except KeyboardInterrupt:
-            print "[X] exit."
+            LOG.info("exit.")
         finally:
             self.sock.close()
 

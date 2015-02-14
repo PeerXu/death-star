@@ -1,11 +1,14 @@
 from collections import namedtuple
 from ctypes import create_string_buffer
+import socket
 import struct
+
+BUFSIZ = 4096
 
 class DNSBuffer(object):
     def __init__(self):
-        self.data = create_string_buffer(512)
-        self.extra = create_string_buffer(512)
+        self.data = create_string_buffer(BUFSIZ)
+        self.extra = create_string_buffer(BUFSIZ)
         self.dof = 0
         self.eof = 0
 
@@ -17,7 +20,6 @@ class DNSBuffer(object):
     def size(self):
         return self.dof
 
-IPV4_ADDR_ST = struct.Struct('!4B')
 class PacketBase(object):
     FIELDS = ()
 
@@ -50,10 +52,20 @@ class PacketBase(object):
             labels.append(*struct.unpack_from('!%ds' % length, pkt, of))
             of += length
 
+    @classmethod
+    def unpack_ipvx_address(cls, pkt, of, ver):
+        sz = 4 if ver == 4 else 16
+        af = socket.AF_INET if ver == 4 else socket.AF_INET6
+        raw = pkt[of:of+sz]
+        return socket.inet_ntop(af, raw), of+sz
 
     @classmethod
     def unpack_ipv4_address(cls, pkt, of):
-        return '.'.join(map(str, struct.unpack('!4B', pkt[of:of+4]))), of
+        return cls.unpack_ipvx_address(pkt, of, 4)
+
+    @classmethod
+    def unpack_ipv6_address(cls, pkt, of):
+        return cls.unpack_ipvx_address(pkt, of, 6)
 
     @classmethod
     def _unpack_rdata(cls, pkt, of, type):
@@ -61,6 +73,8 @@ class PacketBase(object):
             rdata, _ = cls.unpack_labels(pkt, of)
         elif type == 1:
             rdata, _ = cls.unpack_ipv4_address(pkt, of)
+        elif type == 28:
+            rdata, _ = cls.unpack_ipv6_address(pkt, of)
         else:
             rdata, _ = '', of
         return rdata
@@ -80,9 +94,18 @@ class PacketBase(object):
         return packed, len(packed)
 
     @classmethod
+    def pack_ipvx_address(cls, ipvx_str, ver):
+        sz = 4 if ver == 4 else 16
+        af = socket.AF_INET if ver == 4 else socket.AF_INET6
+        return socket.inet_pton(af, ipvx_str), sz
+
+    @classmethod
     def pack_ipv4_address(cls, ipv4_str):
-        return IPV4_ADDR_ST.pack(*map(int, ipv4_str.split('.'))), \
-            IPV4_ADDR_ST.size
+        return cls.pack_ipvx_address(ipv4_str, 4)
+
+    @classmethod
+    def pack_ipv6_address(cls, ipv6_str):
+        return cls.pack_ipvx_address(ipv6_str, 6)
 
 DNS_HDR_FLDS = ('id', 'qr', 'opcode', 'aa', 'tc', 'rd', 'ra',
                 'rcode', 'qdcount', 'ancount', 'nscount', 'arcount')
@@ -112,7 +135,8 @@ class DNSHeader(namedtuple('DNSHeader', DNS_HDR_FLDS), PacketBase):
                 + (self.rd << 8) \
                 + (self.ra << 7) \
                 + self.rcode
-        DNS_HDR_ST.pack_into(buf.data, buf.dof, self.id, flags, self.qdcount, self.ancount, self.nscount, self.arcount)
+        DNS_HDR_ST.pack_into(buf.data, buf.dof, self.id, flags,
+                             self.qdcount, self.ancount, self.nscount, self.arcount)
         buf.dof += DNS_HDR_ST.size
         return buf
 
@@ -148,8 +172,7 @@ class DNSQuestion(namedtuple('DNSQuestion', DNS_QU_FLDS), PacketBase):
 
 DNS_AN_FLDS = ('name', 'type', 'class_', 'ttl', 'rdlength', 'rdata')
 DNS_AN_SEC_ST = struct.Struct('!2HIH')
-class DNSAnswer(namedtuple('DNSAnswer', DNS_AN_FLDS),
-                        PacketBase):
+class DNSAnswer(namedtuple('DNSAnswer', DNS_AN_FLDS), PacketBase):
     FIELDS = DNS_AN_FLDS
 
     @classmethod
@@ -173,6 +196,8 @@ class DNSAnswer(namedtuple('DNSAnswer', DNS_AN_FLDS),
             rdata, rlength = self.pack_labels(self.rdata)
         elif self.type == 1:
             rdata, rlength = self.pack_ipv4_address(self.rdata)
+        elif self.type == 28:
+            rdata, rlength = self.pack_ipv6_address(self.rdata)
         else:
             rdata, rlength = '', 1
         return rdata, rlength
@@ -189,8 +214,7 @@ class DNSAnswer(namedtuple('DNSAnswer', DNS_AN_FLDS),
         return buf
 
 DNS_REQ_FLDS = ('header', 'questions')
-class DNSQuery(namedtuple('DNSQuery', DNS_REQ_FLDS),
-                 PacketBase):
+class DNSQuery(namedtuple('DNSQuery', DNS_REQ_FLDS), PacketBase):
     FIELDS = DNS_REQ_FLDS
 
     def pack(self, buf):
@@ -199,8 +223,7 @@ class DNSQuery(namedtuple('DNSQuery', DNS_REQ_FLDS),
         return buf
 
 DNS_RPY_FLDS = ('header', 'questions', 'answers')
-class DNSResponse(namedtuple('DNSResponse', DNS_RPY_FLDS),
-               PacketBase):
+class DNSResponse(namedtuple('DNSResponse', DNS_RPY_FLDS), PacketBase):
     FIELDS = DNS_RPY_FLDS
 
     def pack(self, buf):
