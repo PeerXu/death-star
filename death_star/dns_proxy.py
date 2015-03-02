@@ -29,7 +29,6 @@ class DNSServer(object):
             resp = dns.unpack(_resp)
             return resp
         # end lookup_remote_nameserver
-
         LOG.debug("raw query: {}".format(repr(req)))
         que = dns.unpack(req)
         LOG.debug("query: {}".format(que))
@@ -93,3 +92,7 @@ class MatchEngine(object):
 
     def reload(self):
         self._rules = self._read_rules_from_file(self.resolv_file)
+
+if __name__ == '__main__':
+    ds = DNSServer()
+    ds.serve_forever()

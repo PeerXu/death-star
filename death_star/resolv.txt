@@ -1,0 +1,5 @@
+^(.*\.)?example\.com$   <current>
+^(.*\.)?163.com$        <current>
+^(.*\.)?sina.com(\.cn)?$       <current>
+^(.*\.)?hao123.com$     <current>
+^(.*\.)?weibo.com$      <current>
